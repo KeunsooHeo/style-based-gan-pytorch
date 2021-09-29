@@ -18,11 +18,20 @@ from model import StyledGenerator, Discriminator
 
 
 def requires_grad(model, flag=True):
+    """
+    assign requires_grad to flag (True or False)
+    requires_grad의 True or False를 flag값으로 변경.
+    requires_grad = Whether model update gradient information or not
+    """
     for p in model.parameters():
         p.requires_grad = flag
 
 
 def accumulate(model1, model2, decay=0.999):
+    """
+    the parameters of model2 are accumulated in model1
+    model2의 파라미터를 model1에 누적함
+    """
     par1 = dict(model1.named_parameters())
     par2 = dict(model2.named_parameters())
 
@@ -31,6 +40,11 @@ def accumulate(model1, model2, decay=0.999):
 
 
 def sample_data(dataset, batch_size, image_size=4):
+    """
+    Return Dataloader for 'dataset'
+    image size and batch size can be adjusted
+    dataset에 대한 DataLoader를 리턴, 이때 image size와 batch size를 조절할 수 있다.
+    """
     dataset.resolution = image_size
     loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=1, drop_last=True)
 
@@ -38,24 +52,34 @@ def sample_data(dataset, batch_size, image_size=4):
 
 
 def adjust_lr(optimizer, lr):
+    """
+    Adjust learning rate of 'optimizer' as 'lr'
+    lr 조정
+    """
     for group in optimizer.param_groups:
         mult = group.get('mult', 1)
         group['lr'] = lr * mult
 
 
 def train(args, dataset, generator, discriminator):
-    step = int(math.log2(args.init_size)) - 2
-    resolution = 4 * 2 ** step
-    loader = sample_data(
-        dataset, args.batch.get(resolution, args.batch_default), resolution
-    )
+    """
+    Train StyleGAN generator and discriminator on 'dataset'
+    """
+    step = int(math.log2(args.init_size)) - 2 # How many times is PGGAN increasing image's resolution?
+    resolution = 4 * 2 ** step # resolution : 4 -> 8 -> 16 -> 32 -> 64 -> 128-> 256
+
+    # Get dataloader
+    loader = sample_data(dataset, args.batch.get(resolution, args.batch_default), resolution)
     data_loader = iter(loader)
 
+    # adjust learning rate of g_optimizer and d_optimizer according to {128: 0.0015, 256: 0.002, 512: 0.003, 1024: 0.003}
+    # If arg.sched is false, lr is set to 0.001
     adjust_lr(g_optimizer, args.lr.get(resolution, 0.001))
     adjust_lr(d_optimizer, args.lr.get(resolution, 0.001))
 
-    pbar = tqdm(range(3_000_000))
+    pbar = tqdm(range(3_000_000)) # progress bar 0 to 3,000,000
 
+    # set to learn discriminator, not to generator
     requires_grad(generator, False)
     requires_grad(discriminator, True)
 
@@ -69,15 +93,18 @@ def train(args, dataset, generator, discriminator):
     max_step = int(math.log2(args.max_size)) - 2
     final_progress = False
 
+    # Training start
     for i in pbar:
+        """
+        train discriminator, freeze generator
+        """
         discriminator.zero_grad()
-
+        # alpha (skip)
         alpha = min(1, 1 / args.phase * (used_sample + 1))
-
         if (resolution == args.init_size and args.ckpt is None) or final_progress:
             alpha = 1
 
-        if used_sample > args.phase * 2:
+        if used_sample > args.phase * 2: # args.phase = number of samples used for each training phases.
             used_sample = 0
             step += 1
 
@@ -90,13 +117,16 @@ def train(args, dataset, generator, discriminator):
                 alpha = 0
                 ckpt_step = step
 
+            # adjust resolution according to resolution
             resolution = 4 * 2 ** step
 
+            # re-load dataloader with adjusted resolution
             loader = sample_data(
                 dataset, args.batch.get(resolution, args.batch_default), resolution
             )
             data_loader = iter(loader)
 
+            # save checkpoint of generator, discriminator, and optimizers.
             torch.save(
                 {
                     'generator': generator.module.state_dict(),
@@ -108,21 +138,27 @@ def train(args, dataset, generator, discriminator):
                 f'checkpoint/train_step-{ckpt_step}.model',
             )
 
+            # adjust learning rate according to resolution
             adjust_lr(g_optimizer, args.lr.get(resolution, 0.001))
             adjust_lr(d_optimizer, args.lr.get(resolution, 0.001))
 
+
         try:
+            # get image
             real_image = next(data_loader)
 
         except (OSError, StopIteration):
+            # if any erros occur, reset dataloader
             data_loader = iter(loader)
             real_image = next(data_loader)
 
-        used_sample += real_image.shape[0]
+        used_sample += real_image.shape[0] # count the number of used samples
 
-        b_size = real_image.size(0)
-        real_image = real_image.cuda()
+        b_size = real_image.size(0) # batch_size
+        real_image = real_image.cuda() # Tensor GPU computing
 
+
+        # two losses can be selected "WGAN-GP" or "R1". As default, wgan-gp is used
         if args.loss == 'wgan-gp':
             real_predict = discriminator(real_image, step=step, alpha=alpha)
             real_predict = real_predict.mean() - 0.001 * (real_predict ** 2).mean()
@@ -145,13 +181,16 @@ def train(args, dataset, generator, discriminator):
             if i%10 == 0:
                 grad_loss_val = grad_penalty.item()
 
+        # Define styles -> gen_in1, gen_in2
+        # Chunking for style mixing. (randomly)
+        # Style mix을 위한 style 분리. (확률적으로)
         if args.mixing and random.random() < 0.9:
             gen_in11, gen_in12, gen_in21, gen_in22 = torch.randn(
                 4, b_size, code_size, device='cuda'
             ).chunk(4, 0)
             gen_in1 = [gen_in11.squeeze(0), gen_in12.squeeze(0)]
             gen_in2 = [gen_in21.squeeze(0), gen_in22.squeeze(0)]
-
+        # NO style mixing
         else:
             gen_in1, gen_in2 = torch.randn(2, b_size, code_size, device='cuda').chunk(
                 2, 0
@@ -159,12 +198,15 @@ def train(args, dataset, generator, discriminator):
             gen_in1 = gen_in1.squeeze(0)
             gen_in2 = gen_in2.squeeze(0)
 
+        # generator create fake image
         fake_image = generator(gen_in1, step=step, alpha=alpha)
+        # discriminator predict the fake image (fake or real)
         fake_predict = discriminator(fake_image, step=step, alpha=alpha)
 
+        # computing gradient
         if args.loss == 'wgan-gp':
             fake_predict = fake_predict.mean()
-            fake_predict.backward()
+            fake_predict.backward() # Discriminate fake image
 
             eps = torch.rand(b_size, 1, 1, 1).cuda()
             x_hat = eps * real_image.data + (1 - eps) * fake_image.data
@@ -177,19 +219,26 @@ def train(args, dataset, generator, discriminator):
                 (grad_x_hat.view(grad_x_hat.size(0), -1).norm(2, dim=1) - 1) ** 2
             ).mean()
             grad_penalty = 10 * grad_penalty
-            grad_penalty.backward()
+            grad_penalty.backward() # Gradient Penalty
             if i%10 == 0:
                 grad_loss_val = grad_penalty.item()
                 disc_loss_val = (-real_predict + fake_predict).item()
 
         elif args.loss == 'r1':
-            fake_predict = F.softplus(fake_predict).mean()
+            fake_predict = F.softplus(fake_predict).mean() # R1 loss
             fake_predict.backward()
             if i%10 == 0:
                 disc_loss_val = (real_predict + fake_predict).item()
 
         d_optimizer.step()
 
+        """
+        ## train generator, freeze discriminator
+        ## Similar to the above process.
+        반대로 G를 학습, D를 고정.
+        위 과정과 비슷함.
+        """
+        # n_critic has set to 1. So, we can ignore n_critic :)
         if (i + 1) % n_critic == 0:
             generator.zero_grad()
 
@@ -197,7 +246,6 @@ def train(args, dataset, generator, discriminator):
             requires_grad(discriminator, False)
 
             fake_image = generator(gen_in2, step=step, alpha=alpha)
-
             predict = discriminator(fake_image, step=step, alpha=alpha)
 
             if args.loss == 'wgan-gp':
@@ -289,13 +337,13 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    # define generator and discriminator.
     generator = nn.DataParallel(StyledGenerator(code_size)).cuda()
-    discriminator = nn.DataParallel(
-        Discriminator(from_rgb_activate=not args.no_from_rgb_activate)
-    ).cuda()
-    g_running = StyledGenerator(code_size).cuda()
+    discriminator = nn.DataParallel(Discriminator(from_rgb_activate=not args.no_from_rgb_activate)).cuda()
+    g_running = StyledGenerator(code_size).cuda() # g_runing = Accumulated generator for stable learning (No direct learning)
     g_running.train(False)
 
+    # define optimizer
     g_optimizer = optim.Adam(
         generator.module.generator.parameters(), lr=args.lr, betas=(0.0, 0.99)
     )
@@ -308,8 +356,10 @@ if __name__ == '__main__':
     )
     d_optimizer = optim.Adam(discriminator.parameters(), lr=args.lr, betas=(0.0, 0.99))
 
+    # initialize g_running as same as generator
     accumulate(g_running, generator.module, 0)
 
+    # checkpoint loading
     if args.ckpt is not None:
         ckpt = torch.load(args.ckpt)
 
@@ -319,16 +369,21 @@ if __name__ == '__main__':
         g_optimizer.load_state_dict(ckpt['g_optimizer'])
         d_optimizer.load_state_dict(ckpt['d_optimizer'])
 
+    # image transfomation
+    # https://pytorch.org/vision/stable/transforms.html
     transform = transforms.Compose(
         [
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True), # Normalize a tensor image with mean and standard deviation for three channel(RGB)
         ]
     )
 
+    # load dataset using IMDB path.
+    # go to MultiResolutionDataset
     dataset = MultiResolutionDataset(args.path, transform)
 
+    # adjust learning rate and batch size according to resolution.
     if args.sched:
         args.lr = {128: 0.0015, 256: 0.002, 512: 0.003, 1024: 0.003}
         args.batch = {4: 512, 8: 256, 16: 128, 32: 64, 64: 32, 128: 32, 256: 32}
@@ -341,4 +396,6 @@ if __name__ == '__main__':
 
     args.batch_default = 32
 
+    ## training
+    # go to train
     train(args, dataset, generator, discriminator)

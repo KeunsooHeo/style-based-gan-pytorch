@@ -11,11 +11,17 @@ import random
 
 
 def init_linear(linear):
+    """
+    linear layer Xavier initailzation.
+    """
     init.xavier_normal(linear.weight)
     linear.bias.data.zero_()
 
 
 def init_conv(conv, glu=True):
+    """
+    convolutional layer He initailzation.
+    """
     init.kaiming_normal(conv.weight)
     if conv.bias is not None:
         conv.bias.data.zero_()
@@ -180,6 +186,9 @@ class Blur(nn.Module):
 
 
 class EqualConv2d(nn.Module):
+    """
+    Normalized Conv2D layer
+    """
     def __init__(self, *args, **kwargs):
         super().__init__()
 
@@ -193,6 +202,9 @@ class EqualConv2d(nn.Module):
 
 
 class EqualLinear(nn.Module):
+    """
+    Normalized Linear layer
+    """
     def __init__(self, in_dim, out_dim):
         super().__init__()
 
@@ -207,6 +219,9 @@ class EqualLinear(nn.Module):
 
 
 class ConvBlock(nn.Module):
+    """
+    ConvBlock
+    """
     def __init__(
         self,
         in_channel,
@@ -265,6 +280,9 @@ class ConvBlock(nn.Module):
 
 
 class AdaptiveInstanceNorm(nn.Module):
+    """
+    AdaIN layer
+    """
     def __init__(self, in_channel, style_dim):
         super().__init__()
 
@@ -278,16 +296,18 @@ class AdaptiveInstanceNorm(nn.Module):
         style = self.style(style).unsqueeze(2).unsqueeze(3)
         gamma, beta = style.chunk(2, 1)
 
-        out = self.norm(input)
-        out = gamma * out + beta
+        out = self.norm(input) # normalize input
+        out = gamma * out + beta # affine style
 
         return out
 
 
 class NoiseInjection(nn.Module):
+    """
+    Noise Injection for Stochastic variation
+    """
     def __init__(self, channel):
         super().__init__()
-
         self.weight = nn.Parameter(torch.zeros(1, channel, 1, 1))
 
     def forward(self, image, noise):
@@ -295,6 +315,9 @@ class NoiseInjection(nn.Module):
 
 
 class ConstantInput(nn.Module):
+    """
+    StyleGAN use Constant Input instead of random noise
+    """
     def __init__(self, channel, size=4):
         super().__init__()
 
@@ -308,6 +331,18 @@ class ConstantInput(nn.Module):
 
 
 class StyledConvBlock(nn.Module):
+    """
+    Convolutional Block
+    - EqualConv2d
+    - Noise injection
+    - LeakyReLU
+    - AdaIN
+
+    - EqualConv2d
+    - Noise injection
+    - LeakyReLU
+    - AdaIN
+    """
     def __init__(
         self,
         in_channel,
@@ -372,9 +407,13 @@ class StyledConvBlock(nn.Module):
 
 
 class Generator(nn.Module):
+    """
+    Synthesis network
+    """
     def __init__(self, code_dim, fused=True):
         super().__init__()
 
+        # generator : progressive
         self.progression = nn.ModuleList(
             [
                 StyledConvBlock(512, 512, 3, 1, initial=True),  # 4
@@ -389,6 +428,7 @@ class Generator(nn.Module):
             ]
         )
 
+        # mapping to RGB channels
         self.to_rgb = nn.ModuleList(
             [
                 EqualConv2d(512, 3, 1),
@@ -406,6 +446,7 @@ class Generator(nn.Module):
         # self.blur = Blur()
 
     def forward(self, style, noise, step=0, alpha=-1, mixing_range=(-1, -1)):
+        #
         out = noise[0]
 
         if len(style) < 2:
@@ -449,11 +490,18 @@ class Generator(nn.Module):
 
 
 class StyledGenerator(nn.Module):
+    """
+    Generator : Synthesis Network + Mixing network
+    Generate fake image
+    """
     def __init__(self, code_dim=512, n_mlp=8):
         super().__init__()
 
+        # Synthesis Network = self.generator
+        # go to Generator
         self.generator = Generator(code_dim)
 
+        # Mixing network = self.style
         layers = [PixelNorm()]
         for i in range(n_mlp):
             layers.append(EqualLinear(code_dim, code_dim))
@@ -504,9 +552,13 @@ class StyledGenerator(nn.Module):
 
 
 class Discriminator(nn.Module):
+    """
+    Discriminator
+    Discriminate fake image
+    """
     def __init__(self, fused=True, from_rgb_activate=False):
         super().__init__()
-
+        # Discriminator : progressive
         self.progression = nn.ModuleList(
             [
                 ConvBlock(16, 32, 3, 1, downsample=True, fused=fused),  # 512
@@ -528,6 +580,7 @@ class Discriminator(nn.Module):
             else:
                 return EqualConv2d(3, out_channel, 1)
 
+        # mapping rgb image
         self.from_rgb = nn.ModuleList(
             [
                 make_from_rgb(16),
